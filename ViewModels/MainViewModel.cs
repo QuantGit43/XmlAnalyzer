@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows.Input;
 using System.Xml.Linq;
+using System.Xml.Serialization; // Для збереження результатів
 using System.Xml.Xsl;
 using XmlAnalyzer.Models;
 using XmlAnalyzer.Services;
@@ -14,6 +15,7 @@ namespace XmlAnalyzer.ViewModels
         private string? _filePath;
         private string? _selectedCategory;
         private string? _searchKeyword;
+        private string _statusMessage = "Файл не обрано";
         
         private bool _isSaxSelected;
         private bool _isDomSelected;
@@ -21,6 +23,12 @@ namespace XmlAnalyzer.ViewModels
 
         public ObservableCollection<Software> SoftwareList { get; set; } = new ObservableCollection<Software>();
         public ObservableCollection<string> Categories { get; set; } = new ObservableCollection<string>();
+
+        public string StatusMessage
+        {
+            get => _statusMessage;
+            set { _statusMessage = value; OnPropertyChanged(); }
+        }
 
         public string? SelectedCategory
         {
@@ -57,12 +65,6 @@ namespace XmlAnalyzer.ViewModels
         public ICommand ClearCommand { get; }
         public ICommand ExportCommand { get; }
         public ICommand ExitCommand { get; }
-        private string _statusMessage = "Файл не обрано";
-        public string StatusMessage
-        {
-            get => _statusMessage;
-            set { _statusMessage = value; OnPropertyChanged(); }
-        }
 
         public MainViewModel()
         {
@@ -72,23 +74,16 @@ namespace XmlAnalyzer.ViewModels
             ExportCommand = new Command(async () => await ExportToHtml());
             ExitCommand = new Command(async () => await ConfirmExit());
         }
-        
+
         private async Task LoadFile()
         {
             try
             {
                 var result = await FilePicker.Default.PickAsync();
-
                 if (result != null)
                 {
                     _filePath = result.FullPath;
-            
-                    // !!! ОСЬ ЦЕЙ РЯДОК ЗМІНЮЄ ТЕКСТ НА ЕКРАНІ !!!
-                    StatusMessage = $"Обрано: {result.FileName}"; 
-            
-                    // Видаліть або закоментуйте DisplayAlert, щоб не дратував
-                    // await Application.Current!.MainPage!.DisplayAlert("Успіх", ...);
-
+                    StatusMessage = $"XML: {result.FileName}";
                     LoadCategoriesFromFile();
                 }
             }
@@ -101,7 +96,6 @@ namespace XmlAnalyzer.ViewModels
         private void LoadCategoriesFromFile()
         {
             if (string.IsNullOrEmpty(_filePath)) return;
-
             Categories.Clear();
             try
             {
@@ -111,11 +105,7 @@ namespace XmlAnalyzer.ViewModels
                               .Where(n => n != null)
                               .Distinct()
                               .ToList();
-
-                foreach (var cat in cats)
-                {
-                    Categories.Add(cat!);
-                }
+                foreach (var cat in cats) Categories.Add(cat!);
             }
             catch { }
         }
@@ -129,20 +119,16 @@ namespace XmlAnalyzer.ViewModels
             }
 
             SoftwareList.Clear();
-
             ISearchStrategy strategy;
 
-            // Вибір стратегії
+            // Патерн Стратегія
             if (IsSaxSelected) strategy = new SaxSearchStrategy();
             else if (IsDomSelected) strategy = new DomSearchStrategy();
             else strategy = new LinqSearchStrategy();
 
             var results = strategy.Search(_filePath, SearchKeyword, SelectedCategory);
 
-            foreach (var item in results)
-            {
-                SoftwareList.Add(item);
-            }
+            foreach (var item in results) SoftwareList.Add(item);
             
             if (results.Count == 0)
                  Application.Current!.MainPage!.DisplayAlert("Інфо", "Нічого не знайдено", "ОК");
@@ -157,27 +143,39 @@ namespace XmlAnalyzer.ViewModels
 
         private async Task ExportToHtml()
         {
-            if (string.IsNullOrEmpty(_filePath)) return;
+            if (SoftwareList.Count == 0)
+            {
+                await Application.Current!.MainPage!.DisplayAlert("Увага", "Спочатку виконайте пошук!", "ОК");
+                return;
+            }
 
             try
             {
-                string xslPath = Path.Combine(FileSystem.CacheDirectory, "transform.xsl");
+                string tempXmlPath = Path.Combine(FileSystem.CacheDirectory, "temp_data.xml");
+                string tempXslPath = Path.Combine(FileSystem.CacheDirectory, "style.xsl");
                 string htmlPath = Path.Combine(FileSystem.CacheDirectory, "output.html");
-                
-                File.WriteAllText(xslPath, XslContent);
+
+               File.WriteAllText(tempXslPath, XslContent);
+
+                XmlSerializer serializer = new XmlSerializer(typeof(ObservableCollection<Software>));
+                using (StreamWriter writer = new StreamWriter(tempXmlPath))
+                {
+                    serializer.Serialize(writer, SoftwareList);
+                }
 
                 XslCompiledTransform transform = new XslCompiledTransform();
-                transform.Load(xslPath);
-                transform.Transform(_filePath, htmlPath);
-
-                bool open = await Application.Current!.MainPage!.DisplayAlert("Успіх", $"HTML готовий. Відкрити?", "Так", "Ні");
+                transform.Load(tempXslPath);
+                transform.Transform(tempXmlPath, htmlPath);
                 
-                if(open)
+                bool open = await Application.Current!.MainPage!.DisplayAlert("Успіх", "Звіт готовий. Відкрити?", "Так", "Ні");
+                if (open)
+                {
                     await Launcher.OpenAsync(new OpenFileRequest { File = new ReadOnlyFile(htmlPath) });
+                }
             }
             catch (Exception ex)
             {
-                await Application.Current!.MainPage!.DisplayAlert("Помилка", ex.Message, "ОК");
+                await Application.Current!.MainPage!.DisplayAlert("Помилка експорту", ex.Message, "ОК");
             }
         }
 
@@ -191,24 +189,21 @@ namespace XmlAnalyzer.ViewModels
 <xsl:stylesheet version='1.0' xmlns:xsl='http://www.w3.org/1999/XSL/Transform'>
   <xsl:template match='/'>
     <html>
-      <body style='font-family: Arial;'>
-        <h2>Звіт: Програмне забезпечення</h2>
-        <table border='1' cellpadding='5' style='border-collapse: collapse; width: 100%;'>
-          <tr bgcolor='#f2f2f2'>
+      <body style='font-family: Segoe UI, Arial; padding: 20px; background-color: #f9f9f9;'>
+        <h2 style='color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px;'>Результати пошуку ПЗ</h2>
+        <table border='1' cellpadding='12' style='border-collapse: collapse; width: 100%; box-shadow: 0 0 20px rgba(0,0,0,0.1); background-color: white;'>
+          <tr style='background-color: #3498db; color: white; text-align: left;'>
             <th>Категорія</th>
             <th>Назва</th>
             <th>Автор</th>
-            <th>Деталі</th>
+            <th>Додаткова інформація</th>
           </tr>
-          <xsl:for-each select='FacultyNetwork/Category/Software'>
-            <tr>
-              <td><xsl:value-of select='../@Name'/></td>
-              <td><xsl:value-of select='@Name'/></td>
+          <xsl:for-each select='ArrayOfSoftware/Software'>
+            <tr style='border-bottom: 1px solid #ddd;'>
+              <td style='font-weight: bold; color: #555;'><xsl:value-of select='@Category'/></td>
+              <td style='font-size: 1.1em;'><xsl:value-of select='@Name'/></td>
               <td><xsl:value-of select='@Author'/></td>
-              <td>
-                <xsl:if test='@LicenseKey'>Key: <xsl:value-of select='@LicenseKey'/></xsl:if>
-                <xsl:if test='@RepoUrl'>Repo: <xsl:value-of select='@RepoUrl'/></xsl:if>
-              </td>
+              <td style='color: #666;'><xsl:value-of select='@Description'/></td>
             </tr>
           </xsl:for-each>
         </table>
@@ -220,7 +215,5 @@ namespace XmlAnalyzer.ViewModels
         public event PropertyChangedEventHandler? PropertyChanged;
         protected void OnPropertyChanged([CallerMemberName] string? name = null) => 
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
-        
-        
     }
 }

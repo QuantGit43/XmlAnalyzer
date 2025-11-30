@@ -24,7 +24,6 @@ namespace XmlAnalyzer.Services
                         }
                         else if (reader.Name == "Software")
                         {
-                            // Якщо категорія обрана, але не співпадає - пропускаємо
                             if (!string.IsNullOrEmpty(category) && currentCategory != category) continue;
 
                             string name = reader.GetAttribute("Name") ?? "";
